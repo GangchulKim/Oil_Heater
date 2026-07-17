@@ -44,6 +44,7 @@ float Out_T = 0;                        // Out_T : 절연유체출구 온도
 float heaterPower = 0;                  // heaterPower : 히터 전력 제어값(0 to 10000)
 float Set_T = 40;                       // Set_T : 절연유체 제어(목표) 온도
 uint16_t StartStop = 0;                 // StartStop : 전력제어 출력 ON/OFF
+bool sensorFault = false;               // sensorFault : 써모커플 고장(단선/접촉불량) 발생 시 true, 감지되면 제어 출력을 강제로 차단
 //uint16_t lastStartStop = 0;           // lastSrtartStop : StartStop 파라미터가 변경되었을 때만 동작시키기 위해 초기값 설정          
 //uint16_t lastSet_T = 40;              // lastSet_T : Set_T 파라미터가 변경되었을 때만 동작시키기 위해 초기값 설정  
 
@@ -62,7 +63,7 @@ PID myController(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 double alpha = 200.0;                     // Feedforward 계수 (튜닝 필요!!!))
 
 // 함수 선언
-void sendToNextion(String componentId, float value);
+void sendToNextion(const char* componentId, float value);
 void checkHMI();
 void readSensors();
 void parseNextionPacket(byte* buf, int len);
@@ -112,9 +113,9 @@ void loop() {
     lastReadTime = millis();
     readSensors();
 
-    if (StartStop == 1) {
+    if (StartStop == 1 && !sensorFault) {
       // PID 제어 로직
-      Input = Out_T;              
+      Input = Out_T;
       Setpoint = Set_T;
        myController.Compute();
 
@@ -127,10 +128,13 @@ void loop() {
         // DEBUG_SERIAL.println("-> [성공] SCR ON");
       } else {
         DEBUG_SERIAL.print("-> [실패] 제어값 전송 실패. 에러 코드: 0x");
-        DEBUG_SERIAL.println(result, HEX); 
+        DEBUG_SERIAL.println(result, HEX);
       }
     } else {
-      controlSCR_Value = 0;                                                
+      if (StartStop == 1 && sensorFault) {
+        DEBUG_SERIAL.println(F("안전정지: 써모커플 오류로 인해 히터 출력을 차단합니다."));
+      }
+      controlSCR_Value = 0;
       masterSCR.writeSingleRegister(ADDR_S_PHASE_CTRL, controlSCR_Value);
     }
   }
@@ -140,7 +144,7 @@ void loop() {
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 // Nextion 컴포넌트에 값을 전송하는 함수
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-void sendToNextion(String componentId, float value) {
+void sendToNextion(const char* componentId, float value) {
   int valToSend = (int)(value); 
   HMI_SERIAL.print(componentId);
   HMI_SERIAL.print(".val=");
@@ -224,13 +228,11 @@ void readSensors() {
     DEBUG_SERIAL.println(result, HEX); */
   }
 
-  // 각 센서로부터 섭씨 온도 읽기
+  // 각 센서로부터 섭씨 온도 읽기 (In_T, Out_T는 실제 온도(원래 스케일)로 저장하여 PID/Feedforward 계산과 Set_T가 같은 스케일을 갖도록 함)
   In_T = max_InT.readThermocoupleTemperature();
-  In_T = In_T * 10;
-  sendToNextion("x0", In_T);
+  sendToNextion("x0", In_T * 10);   // Nextion은 소수점 1자리 표시이므로, 전송할 때만 10배로 변환
   Out_T = max_OutT.readThermocoupleTemperature();
-  Out_T = Out_T * 10;
-  sendToNextion("x1", Out_T);
+  sendToNextion("x1", Out_T * 10);  // Nextion은 소수점 1자리 표시이므로, 전송할 때만 10배로 변환
 
 
   
@@ -246,10 +248,11 @@ void readSensors() {
     DEBUG_SERIAL.println(F(" °C"));
   } */
 
-  // 온도 데이터 오류가 발생하면, 시리얼모니터로 출력
+  // 온도 데이터 오류가 발생하면, 시리얼모니터로 출력하고 제어 출력을 차단하기 위해 플래그 설정
   uint8_t fault_In = max_InT.readFault();
   uint8_t fault_Out = max_OutT.readFault();
-  if (fault_In || fault_Out) {
+  sensorFault = (fault_In != 0) || (fault_Out != 0);
+  if (sensorFault) {
     DEBUG_SERIAL.println(F("경고: 써모커플 접촉 불량 또는 단선 확인 필요"));
   }
 }
