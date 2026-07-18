@@ -45,8 +45,8 @@ float heaterPower = 0;                  // heaterPower : 히터 전력 제어값
 float Set_T = 40;                       // Set_T : 절연유체 제어(목표) 온도
 uint16_t StartStop = 0;                 // StartStop : 전력제어 출력 ON/OFF
 bool sensorFault = false;               // sensorFault : 써모커플 고장(단선/접촉불량) 발생 시 true, 감지되면 제어 출력을 강제로 차단
-//uint16_t lastStartStop = 0;           // lastSrtartStop : StartStop 파라미터가 변경되었을 때만 동작시키기 위해 초기값 설정          
-//uint16_t lastSet_T = 40;              // lastSet_T : Set_T 파라미터가 변경되었을 때만 동작시키기 위해 초기값 설정  
+//uint16_t lastStartStop = 0;           // lastSrtartStop : StartStop 파라미터가 변경되었을 때만 동작시키기 위해 초기값 설정 (PC 제어 고려)         
+//uint16_t lastSet_T = 40;              // lastSet_T : Set_T 파라미터가 변경되었을 때만 동작시키기 위해 초기값 설정 (PC 제어 고려)
 
 // MAX31856(써머커플 온도 측정 모듈) CS 핀 정의 및 객체 생성, 온도 측정 주기 설정
 const int CS_IN_T = 48;                                     // In_T 측정용 MAX31856 CS 핀
@@ -58,9 +58,9 @@ const unsigned long sensorReadInterval = 1000;              // tempReadInterval:
 
 // PID 제어 변수 및 파라미터 설정, 객체 생성
 double Setpoint, Input, Output;
-double Kp = 10.0, Ki = 0.5, Kd = 10.0;    // PID 파라미터 (튜닝 필요!!!)
+double Kp = 150.0, Ki = 0.15, Kd =  0.0;    // PID 파라미터 (P 150고, 온도차가 20이면 30 % 부하공급 (실험 결과에 의해 조정 필요), I는 최대한 작게하여 오버슈팅 최소화, D는 필요없음)
 PID myController(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
-double alpha = 200.0;                     // Feedforward 계수 (튜닝 필요!!!))
+double alpha = 200.0;                      // feedforward = (Set_T - In_T) * alpha, 제어온도 20도 차이면, alpha 값으로 40% 부하 공급 (실험 결과에 의해 조정 필요)
 
 // 함수 선언
 void sendToNextion(const char* componentId, float value);
@@ -74,20 +74,20 @@ void setup() {
   MASTER_SERIAL.begin(BAUD_RATE, SERIAL_8N1);   // 데이터 비트 8비트, 패리티 비트 None, 스탑비트 1비트, 8N1을 명시적으로 지정
   SLAVE_SERIAL.begin(BAUD_RATE, SERIAL_8N1);    // 데이터 비트 8비트, 패리티 비트 None, 스탑비트 1비트, 8N1을 명시적으로 지정
 
+  // Master 객체 초기화 (각 슬레이브에 고유 ID 지정됨), 슬레이브가 복수인 경우 슬레이브마다 객체 초기화
+  masterSCR.begin(ID_SCR, MASTER_SERIAL);
+
   // Slave 설정 및 초기화
   // slave.configureHoldingRegisters(startAddress, numberOfRegisters)
   // slave.configureHoldingRegisters(holdingRegs, 10)의 경우는, 여기서는 holdingRegs 배열 자체를 Modbus Holding Register 영역으로 사용하고, 배열크기와 동일하게 지정
   slave.begin(SLAVE_UNIT_ID, BAUD_RATE);  
   slave.configureHoldingRegisters(holdingRegs, 10);  
 
-  // Master 객체 초기화 (각 슬레이브에 고유 ID 지정됨), 슬레이브가 복수인 경우 슬레이브마다 객체 초기화
-  masterSCR.begin(ID_SCR, MASTER_SERIAL);
-
   // Nextion HMI 초기 설정온도로 설정함(Nextion HMI 설정온도 객체는 Xfloat, x3)
   sendToNextion("x3", Set_T);
 
   // MAX31856 센서 초기화 및 써모컬을 T타입으로 설정
-  if (!max_InT.begin() || !max_OutT.begin()) {
+  if (!max_InT.begin() || !max_OutT.begin()) {    // MAX31856 센서 초기화 실패 시(0), 성공하면 (1) 반환
     DEBUG_SERIAL.println(F("오류: MAX31856 센서를 찾을 수 없습니다. 결선을 확인하세요."));
   } else {
     max_InT.setThermocoupleType(MAX31856_TCTYPE_T);
@@ -95,7 +95,7 @@ void setup() {
   }
 
   // PID 초기화
-  myController.SetOutputLimits(0, 10000);
+  myController.SetOutputLimits(0, 10000);       // 출력제어(0 ~ 100% to 0 ~ 10000, X 100), 1A 이상, Max 25A
   myController.SetMode(AUTOMATIC);
   myController.SetSampleTime(1000);
 
@@ -117,7 +117,7 @@ void loop() {
       // PID 제어 로직
       Input = Out_T;
       Setpoint = Set_T;
-       myController.Compute();
+      myController.Compute();
 
       double feedforward = (Set_T - In_T) * alpha;                          // Feedforward 계산 (절연유체 입구온도 고려)
       controlSCR_Value = constrain((int)(Output + feedforward), 0, 10000);  // 최종 제어값
@@ -209,19 +209,19 @@ void parseNextionPacket(byte* buf, int len) {         // 수신된 바이트 배
 
 
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// MAX31856에서 온도를 읽어오는 함수
+// Pion 전력제어기에서 전류, MAX31856에서 온도를 읽어오는 함수
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 void readSensors() {
   
   uint8_t result = masterSCR.readInputRegisters(ADDR_S_CURRENT_SA, 1);  // 전류값을 읽음 (Resolution: 0.1A), 10이 곱해져서 송신됨
   if (result == masterSCR.ku8MBSuccess) {
-    heaterPower = (float)masterSCR.getResponseBuffer(0)/1000 * 220;    // 단위를 전압 220V를 곱해서, kW로 변환 (Nextion HMI가 소수점 1자리여서, 10을 곱해서 보내야함)
-    sendToNextion("x2", heaterPower);
+    heaterPower = (float)masterSCR.getResponseBuffer(0)/10 * 220;      // 10으로 나누어서 실제 전류 계산(A), 220V를 곱해서 출력(W) 계산
+    sendToNextion("x2", heaterPower);                                  // Nextion에서 소수점 없이 W로 표시
 
     // 시리얼모니터로 전력제어기 출력 결과 출력
     /* DEBUG_SERIAL.print("Heater Power: ");
     DEBUG_SERIAL.print(heaterPower);
-    DEBUG_SERIAL.println(" kW");
+    DEBUG_SERIAL.println(" W");
   } else {
     // 통신 에러 발생 시 에러 코드 출력
     DEBUG_SERIAL.print("Modbus Error: 0x");
@@ -230,12 +230,10 @@ void readSensors() {
 
   // 각 센서로부터 섭씨 온도 읽기 (In_T, Out_T는 실제 온도(원래 스케일)로 저장하여 PID/Feedforward 계산과 Set_T가 같은 스케일을 갖도록 함)
   In_T = max_InT.readThermocoupleTemperature();
-  sendToNextion("x0", In_T * 10);   // Nextion은 소수점 1자리 표시이므로, 전송할 때만 10배로 변환
+  sendToNextion("x0", In_T * 10);                // Nextion은 소수점 1자리 표시이므로, 전송할 때만 10배로 변환
   Out_T = max_OutT.readThermocoupleTemperature();
-  sendToNextion("x1", Out_T * 10);  // Nextion은 소수점 1자리 표시이므로, 전송할 때만 10배로 변환
+  sendToNextion("x1", Out_T * 10);               // Nextion은 소수점 1자리 표시이므로, 전송할 때만 10배로 변환
 
-
-  
   // 에러 체크 및 시리얼 모니터 출력(디버그용으로, 필요시 주석 제거로 확인)
   /* DEBUG_SERIAL.print(F("[온도 모니터] In_T: "));
   if (isnan(In_T)) DEBUG_SERIAL.print(F("Error"));
@@ -249,9 +247,9 @@ void readSensors() {
   } */
 
   // 온도 데이터 오류가 발생하면, 시리얼모니터로 출력하고 제어 출력을 차단하기 위해 플래그 설정
-  uint8_t fault_In = max_InT.readFault();
-  uint8_t fault_Out = max_OutT.readFault();
-  sensorFault = (fault_In != 0) || (fault_Out != 0);
+  uint8_t fault_In = max_InT.readFault();                // MAX31856에서 Fault 발생 시, 0이 아닌 값 반환
+  uint8_t fault_Out = max_OutT.readFault();              // MAX31856에서 Fault 발생 시, 0이 아닌 값 반환
+  sensorFault = (fault_In != 0) || (fault_Out != 0);     // MAX31856에서 Fault 발생 시, 제어 출력을 차단하기 위해 sensorFault 플래그를 true로 설정
   if (sensorFault) {
     DEBUG_SERIAL.println(F("경고: 써모커플 접촉 불량 또는 단선 확인 필요"));
   }
