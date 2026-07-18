@@ -84,7 +84,7 @@ void setup() {
   slave.configureHoldingRegisters(holdingRegs, 10);  
 
   // Nextion HMI 초기 설정온도로 설정함(Nextion HMI 설정온도 객체는 Xfloat, x3)
-  sendToNextion("x3", Set_T);
+  sendToNextion("x3", Set_T * 10);      // Nextion HMI는 소수점 1자리 표시이므로, 전송할 때만 10배로 변환     
 
   // MAX31856 센서 초기화 및 써모컬을 T타입으로 설정
   if (!max_InT.begin() || !max_OutT.begin()) {    // MAX31856 센서 초기화 실패 시(0), 성공하면 (1) 반환
@@ -192,7 +192,7 @@ void parseNextionPacket(byte* buf, int len) {         // 수신된 바이트 배
     x3_raw |= ((long)buf[7] << 16);                   // 1바이트(8 bits)씩 순차적으로 저장 
     x3_raw |= ((long)buf[8] << 24);                   // ㅣ= (OR연산)
 
-    Set_T = (int)x3_raw;                              // (int) : x3_raw 4바이트 크기 정수를, 아두이노 메가 기본 정수형 int 타입(2바이트) 형으로 변환
+    Set_T = (float)x3_raw/10.0;                       // (int) : x3_raw 4바이트 크기 정수, 10으로 나누어 소수점 1자리로 변환하여 Set_T에 저장
     StartStop = 1;
     /* DEBUG_SERIAL.println("STATUS: RUNNING");
     DEBUG_SERIAL.print("Set_T: ");
